@@ -34,6 +34,6 @@ class AgentState(TypedDict):
     repo_url: str
     pdf_path: str
     rubric_dimensions: List[str]
-    evidences: Annotated[Dict[str, Evidence], operator.ior]
+    evidences: Annotated[Dict[str, List[Evidence]], operator.ior]
     opinions: Annotated[List[JudicialOpinion], operator.add]
     final_report: Optional[AuditReport]
