@@ -1,0 +1,9 @@
+# Example lock file. For a reproducible environment, generate a proper lock using `uv lock` or your preferred tool.
+# These versions are illustrative — run `uv lock` to pin exact resolved versions.
+langgraph==0.1.0
+langchain==0.0.323
+langchain-openai==0.0.73
+pydantic==2.3.0
+python-dotenv==1.0.1
+docling==0.1.0
+pypdf==3.11.0

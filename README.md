@@ -94,3 +94,34 @@ if __name__ == "__main__":
     
     run_audit(TARGET_REPO, TARGET_PDF)
 ```
+
+## Reproducibility and Locking
+
+To make builds reproducible, generate a lockfile with `uv` or pin your environment. An example lock file is included at `requirements.lock.txt`, but you should produce a lock with your environment:
+
+```bash
+# Generate a lock with uv (recommended):
+uv lock
+
+# Or create a pinned requirements file from your virtualenv
+pip freeze > requirements.txt
+```
+
+## Python Version and Optional Dependencies
+
+- **Python version**: This project targets Python 3.13+ (see `pyproject.toml`). Use `pyenv` or your system package manager to install the matching interpreter.
+- **Optional dependencies**: For better PDF parsing and structured extraction you can install `docling` and `pypdf` (recommended). If you plan to run LLM-based synthesis, ensure `langchain` and `langchain-openai` are installed and API keys configured.
+
+## Dedicated full-audit command
+
+We've added a small CLI runner that executes the graph and streams node output. Example:
+
+```bash
+# activate virtualenv first
+source .venv/bin/activate
+
+# run the audit
+python -m src.run_audit --repo https://github.com/langchain-ai/langgraph-example.git --pdf ./docs/project_specs.pdf
+```
+
+This will attempt to import `src.graph` and run the compiled graph; use `uv sync` / `uv lock` first to ensure dependencies are installed and pinned.
