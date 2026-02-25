@@ -15,7 +15,7 @@ def clone_repo(repo_url: str) -> Generator[str, None, None]:
     temp_dir = tempfile.TemporaryDirectory()
     try:
         # Using subprocess for secure execution
-        subprocess.run(
+        result = subprocess.run(
             ["git", "clone", repo_url, temp_dir.name],
             check=True,
             capture_output=True,
@@ -23,7 +23,15 @@ def clone_repo(repo_url: str) -> Generator[str, None, None]:
         )
         yield temp_dir.name
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to clone repository: {e.stderr}")
+        # Provide a helpful error message with suggestions for auth issues
+        stderr = (e.stderr or "").strip()
+        msg = (
+            f"Failed to clone repository '{repo_url}' (return code {e.returncode}).\n"
+            f"Git stderr: {stderr}\n"
+            "Possible causes: network issues, authentication failure (SSH key or token), or the repository does not exist/permission denied.\n"
+            "Suggestions: verify the URL, ensure SSH keys or tokens are configured, or try cloning manually to inspect the error."
+        )
+        raise RuntimeError(msg)
     finally:
         temp_dir.cleanup()
 
@@ -53,7 +61,10 @@ def extract_git_history(repo_path: str) -> List[Dict[str, str]]:
                         "message": parts[2]
                     })
         return history
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip()
+        # Keep behavior stable (return empty history) but surface a helpful log via stderr
+        print(f"Warning: failed to extract git history from {repo_path}: {stderr}")
         return []
 
 def analyze_graph_structure(repo_path: str) -> Dict[str, Any]:
