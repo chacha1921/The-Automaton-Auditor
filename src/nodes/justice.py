@@ -66,15 +66,99 @@ def debate_node(state: AgentState) -> Dict[str, Any]:
     # We return 'debated' key to signal graph flow.
     return {"opinions": [opinion], "debated": True}
 
+def calculate_criterion_scores(opinions: List[JudicialOpinion]) -> Dict[str, float]:
+    """
+    Calculates weighted scores per criterion.
+    Returns a dictionary: {criterion_id: weighted_score}
+    """
+    scores = {}
+    weights = {}
+    
+    role_weights = {
+        "TechLead": 1.5,
+        "Prosecutor": 1.0,
+        "Defense": 1.0, 
+        "DebateModerator": 2.0
+    }
+
+    for op in opinions:
+        cid = op.criterion_id
+        if cid not in scores:
+            scores[cid] = 0.0
+            weights[cid] = 0.0
+            
+        weight = role_weights.get(op.judge, 1.0)
+        scores[cid] += op.score * weight
+        weights[cid] += weight
+        
+    final_scores = {}
+    for cid in scores:
+        if weights[cid] > 0:
+            final_scores[cid] = scores[cid] / weights[cid]
+        else:
+            final_scores[cid] = 0.0
+            
+    return final_scores
+
+def detect_security_override(opinions: List[JudicialOpinion]) -> Optional[float]:
+    """
+    Deterministic check for Security Override.
+    If Prosecutor gives score <= 2 AND mentions 'security'/'unsafe'/'os.system',
+    return the CAP value (4.0). Otherwise return None.
+    """
+    for op in opinions:
+        if op.judge == "Prosecutor" and op.score <= 2:
+            arg_lower = op.argument.lower()
+            if any(k in arg_lower for k in ["security", "unsafe", "os.system", "vulnerability", "malicious"]):
+                print("DEBUG: Security Override Triggered by Prosecutor")
+                return 4.0
+    return None
+
+def detect_variance(opinions: List[JudicialOpinion]) -> List[str]:
+    """
+    Detects criteria with high variance (> 2 points difference).
+    Returns list of criterion_ids with high dissent.
+    """
+    ranges = {}
+    
+    for op in opinions:
+        cid = op.criterion_id
+        if cid not in ranges:
+            ranges[cid] = []
+        ranges[cid].append(op.score)
+        
+    dissenting_criteria = []
+    for cid, scores in ranges.items():
+        if len(scores) > 1 and (max(scores) - min(scores) > 2):
+            dissenting_criteria.append(cid)
+            
+    return dissenting_criteria
+
 def chief_justice_node(state: AgentState) -> Dict[str, Any]:
     """
-    Chief Justice Node: Synthesizes opinions into a final report using an LLM for reasoning and dialectical integration.
+    Chief Justice Node: Synthesizes opinions into a final report using deterministic logic + LLM narrative.
     """
     opinions: List[JudicialOpinion] = state.get("opinions", []) or []
     repo = state.get("repo_url", "unknown")
 
-    # Calculate deterministic score
-    deterministic_score = calculate_weighted_score(opinions)
+    # 1. Deterministic Scoring
+    weighted_score = calculate_weighted_score(opinions)
+    criterion_scores = calculate_criterion_scores(opinions)
+    
+    # 2. Security Override Logic
+    security_cap = detect_security_override(opinions)
+    final_score = weighted_score
+    override_msg = ""
+    
+    if security_cap is not None and weighted_score > security_cap:
+        final_score = security_cap
+        override_msg = f"NOTE: Score capped at {security_cap} due to Security Protocol violation flagged by Prosecutor."
+        
+    # 3. Variance Detection
+    dissent_list = detect_variance(opinions)
+    dissent_msg = ""
+    if dissent_list:
+        dissent_msg = f"Significant Judicial Dissent detected in: {', '.join(dissent_list)}. Synthesis required."
 
     if not opinions:
         return {"final_report": AuditReport(
@@ -97,52 +181,47 @@ def chief_justice_node(state: AgentState) -> Dict[str, Any]:
         })
     
     context_str = json.dumps(opinions_ctx, indent=2)
+    criterion_scores_str = json.dumps(criterion_scores, indent=2)
 
     # Initialize LLM
     llm = get_model()
     
-    # Prompt
+    # Prompt - Now using PRE-COMPUTED values
     prompt = f"""
-    You are the Chief Justice of the Automation Auditor Court.
-    Your task is to synthesize the final specific Verdict and Audit Report based on the opinions submitted by the Associate Judges (Prosecutor, Defense, TechLead, and potentially DebateModerator).
+    You are the Chief Justice. Synthesize the final Audit Report.
     
-    INPUT OPINIONS:
-    {context_str}
+    INPUT DATA:
+    - Judicial Opinions: {context_str}
+    - Computed Criterion Scores: {criterion_scores_str}
+    - Calculated Weighted Score: {weighted_score:.2f}
+    - Security Override Status: {override_msg if override_msg else "None"}
+    - Dissent Notices: {dissent_msg if dissent_msg else "None"}
     
-    PRE-CALCULATED DETERMINISTIC SCORE:
-    The weighted score for this audit is {deterministic_score:.2f}.
+    MANDATORY INSTRUCTIONS:
+    1. Your Total Score IS DETERMINED as: {final_score:.2f}. Do not recalculate it.
+    2. Write a Summary that synthesizes the divergent views, explicitly mentioning the dissent in {dissent_msg} if present.
+    3. If Security Override is active, explain specifically WHY the score was capped.
+    4. Provide specific Recommendations.
+    5. For 'criterion_results', use the exact scores provided in 'Computed Criterion Scores', but generate the qualitative 'reasoning'.
     
-    RULES FOR SYNTHESIS (MANDATORY):
-    1. **Security Override**: ONLY if the Prosecutor EXPLICITLY mentions "os.system", "unsafe execution", or "security vulnerability" AND assigns a score of 1 or 2, then cap the total score at 4.0. If the Prosecutor gives a low score for "Orchestration" or "Structure" but admits the code is safe, DO NOT cap the score based on Security Override.
-    2. **Fact Supremacy**: Opinions that cite specific code evidence (e.g., 'Found os.system in file.py') must be weighed heavier than "vibe-based" opinions.
-    3. **Variance Handling**: If there is significant disagreement (>2 points diff), explicitly mention this dissent in the summary.
-    4. **Per-Criterion Drilldown**: Your 'criterion_results' MUST break down the verdict by the rubric dimensions provided in the arguments.
-    
-    OUTPUT INSTRUCTIONS:
-    1. Use the PRE-CALCULATED SCORE ({deterministic_score:.2f}) as a baseline, but apply the 'Security Override' rule if applicable. 
-    2. Generate a list of concise Recommendations based on the remediation steps suggested by the judges.
-    3. Write a Summary that synthesizes the divergent views.
-    
-    OUTPUT FORMAT:
-    Return a valid JSON object matching this structure:
+    OUTPUT FORMAT (JSON):
     {{
-        "total_score": float, 
+        "total_score": {final_score:.2f}, 
         "criterion_results": [
             {{
                 "criterion": "Criterion Name",
-                "score": float,
-                "reasoning": "Synthesis of arguments. Explicitly mention if judges disagreed.",
-                "evidence_summary": "Key evidence cited."
-            }},
-            ...
+                "score": float, # MUST MATCH Computed Score
+                "reasoning": "Narrative explanation of the score and any conflict.",
+                "evidence_summary": "Key evidence."
+            }}
         ],
-        "summary": "Executive summary of the audit.",
-        "recommendations": ["Rec 1", "Rec 2", ...]
+        "summary": "Executive summary...",
+        "recommendations": ["..."]
     }}
     """
     
     messages = [
-        SystemMessage(content="You are the Chief Justice. Synthesize a fair and evidence-based verdict following strict rules. Output valid JSON only."),
+        SystemMessage(content="You are the Chief Justice. Use the provided deterministic scores. Do not hallucinate numbers."),
         HumanMessage(content=prompt)
     ]
     
@@ -150,48 +229,60 @@ def chief_justice_node(state: AgentState) -> Dict[str, Any]:
         response = llm.invoke(messages)
         content = response.content
         
-        # Naive JSON extraction
-        json_str = content
-        if "```json" in content:
-            json_str = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            json_str = content.split("```")[1].split("```")[0]
+        # Robust JSON extraction
+        json_str = content.strip()
+        if "```json" in json_str:
+            json_str = json_str.split("```json")[1].split("```")[0]
+        elif "```" in json_str:
+            json_str = json_str.split("```")[1].split("```")[0]
         
-        data = json.loads(json_str.strip())
+        # Clean potential leading/trailing non-json chars
+        start = json_str.find("{")
+        end = json_str.rfind("}")
+        if start != -1 and end != -1:
+            json_str = json_str[start:end+1]
+
+        data = json.loads(json_str)
         
         results = []
-        for res in data.get("criterion_results", []):
-            evidence_summary = res.get("evidence_summary", "N/A")
-            if isinstance(evidence_summary, list):
-                evidence_summary = ", ".join(str(e) for e in evidence_summary)
-            else:
-                evidence_summary = str(evidence_summary)
-
+        # Merge LLM reasoning with Deterministic Scores
+        # We start with our computed scores keys to ensure coverage
+        for crit, score in criterion_scores.items():
+            # Find matching reasoning from LLM output
+            reasoning = "Score calculated deterministically."
+            evidence = "See opinions."
+            
+            # Try to find the LLM's narrative for this criterion
+            for res in data.get("criterion_results", []):
+                if res.get("criterion") == crit:
+                    reasoning = res.get("reasoning", reasoning)
+                    evidence = res.get("evidence_summary", evidence)
+                    break
+            
             results.append(CriterionResult(
-                criterion=res.get("criterion", "General"),
-                score=float(res.get("score", 0.0)),
-                reasoning=res.get("reasoning", "N/A"),
-                evidence_summary=evidence_summary
+                criterion=crit,
+                score=score,
+                reasoning=reasoning,
+                evidence_summary=str(evidence)
             ))
             
         report = AuditReport(
             repo_name=repo,
-            # Force deterministic score
-            total_score=deterministic_score,
+            total_score=final_score,
             criterion_results=results,
             summary=data.get("summary", "Summary generation failed."),
             recommendations=data.get("recommendations", [])
         )
 
     except Exception as e:
-        # Fallback mechanism if LLM fails
-        print(f"Chief Justice LLM Failed: {e}. Falling back to heuristic aggregation.")
+        # Fallback mechanism
+        print(f"Chief Justice LLM Failed: {e}")
         
         report = AuditReport(
             repo_name=repo,
-            total_score=deterministic_score,
-            criterion_results=[CriterionResult(criterion="Fallback Aggregation", score=deterministic_score, reasoning="LLM Synthesis Failed", evidence_summary="See raw opinions")],
-            summary=f"LLM Synthesis Failed. Fallback Score: {deterministic_score:.2f}",
+            total_score=final_score,
+            criterion_results=[],
+            summary=f"LLM Synthesis Failed. Score: {final_score:.2f}. {override_msg}",
             recommendations=["Manual review required."]
         )
         
