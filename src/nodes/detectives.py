@@ -1,8 +1,14 @@
 from typing import Dict, Any, List
 import json
+import os
+import ast
+import base64
+import mimetypes
+from langchain_core.messages import SystemMessage, HumanMessage
 from src.state import AgentState, Evidence
-from src.tools.repo_tools import clone_repo, analyze_graph_structure, extract_git_history
-from src.tools.doc_tools import ingest_pdf_and_chunk, query_chunks
+from src.tools.repo_tools import clone_repo, extract_git_history
+from src.tools.doc_tools import ingest_pdf_and_chunk, extract_images_from_pdf
+from src.utils.llm import get_model
 
 def _load_rubric():
     try:
@@ -11,72 +17,190 @@ def _load_rubric():
     except FileNotFoundError:
         return {"dimensions": []}
 
+def analyze_graph_structure(path: str) -> Dict[str, Any]:
+    """
+    Analyzes the repository structure using AST to verify rubric dimensions.
+    Checks for StateGraph, parallel branches (fan-out), and conditional edges.
+    """
+    findings = {
+        "State Management Rigor": {"found": False, "evidence": []},
+        "Graph Orchestration Architecture": {"found": False, "evidence": []},
+        "Structured Output Enforcement": {"found": False, "evidence": []},
+        "Safe Tool Engineering": {"found": True, "evidence": []} # Assume safe until proven otherwise
+    }
+    
+    for root, _, files in os.walk(path):
+        if ".git" in root:
+            continue
+            
+        for file in files:
+            if not file.endswith(".py"):
+                continue
+                
+            file_path = os.path.join(root, file)
+            try:
+                rel_path = os.path.relpath(file_path, path)
+            except ValueError:
+                rel_path = file_path
+            
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                
+                # Check for unsafe imports/usage
+                if "os.system" in content or "subprocess.run" in content:
+                    findings["Safe Tool Engineering"]["found"] = False
+                    findings["Safe Tool Engineering"]["evidence"].append(f"Potential unsafe execution in {rel_path}")
+
+                tree = ast.parse(content)
+                
+                for node in ast.walk(tree):
+                    # --- State Management Check ---
+                    if isinstance(node, ast.ClassDef):
+                        for base in node.bases:
+                            if (isinstance(base, ast.Name) and base.id == "TypedDict") or \
+                               (isinstance(base, ast.Attribute) and base.attr == "TypedDict"):
+                                findings["State Management Rigor"]["found"] = True
+                                findings["State Management Rigor"]["evidence"].append(f"Found TypedDict '{node.name}' in {rel_path}")
+                            
+                            if (isinstance(base, ast.Name) and base.id == "BaseModel") or \
+                               (isinstance(base, ast.Attribute) and base.attr == "BaseModel"):
+                                findings["State Management Rigor"]["found"] = True
+                                findings["State Management Rigor"]["evidence"].append(f"Found BaseModel '{node.name}' in {rel_path}")
+
+                    # --- Graph Orchestration Check ---
+                    if isinstance(node, ast.Call):
+                        func = node.func
+                        # 1. StateGraph Instantiation
+                        if (isinstance(func, ast.Name) and func.id == "StateGraph") or \
+                           (isinstance(func, ast.Attribute) and func.attr == "StateGraph"):
+                            findings["Graph Orchestration Architecture"]["found"] = True
+                            findings["Graph Orchestration Architecture"]["evidence"].append(f"Found StateGraph instantiation in {rel_path} line {node.lineno}")
+                        
+                        # 2. Graph Methods
+                        if isinstance(func, ast.Attribute) and func.attr in ["add_node", "add_edge", "compile"]:
+                             findings["Graph Orchestration Architecture"]["found"] = True
+                             findings["Graph Orchestration Architecture"]["evidence"].append(f"Found graph method '{func.attr}' in {rel_path} line {node.lineno}")
+                        
+                        # 3. Parallelism / Branching Detection
+                        # Check for add_conditional_edges
+                        if isinstance(func, ast.Attribute) and func.attr == "add_conditional_edges":
+                            findings["Graph Orchestration Architecture"]["found"] = True
+                            findings["Graph Orchestration Architecture"]["evidence"].append(f"Found CONDITIONAL EDGE in {rel_path} line {node.lineno} (Non-Linear Control Flow)")
+
+                    # --- Structured Output Check ---
+                    if isinstance(node, ast.Call):
+                        func = node.func
+                        if isinstance(func, ast.Attribute) and func.attr == "with_structured_output":
+                            findings["Structured Output Enforcement"]["found"] = True
+                            findings["Structured Output Enforcement"]["evidence"].append(f"Found .with_structured_output() in {rel_path} line {node.lineno}")
+                        
+                        if isinstance(func, ast.Attribute) and func.attr == "bind_tools":
+                             findings["Structured Output Enforcement"]["evidence"].append(f"Found .bind_tools() in {rel_path} line {node.lineno}")
+
+            except Exception as e:
+                continue
+                
+    return findings
+
 def repo_investigator(state: AgentState) -> Dict[str, Any]:
     """
-    Investigates the repository for LangGraph structure and Git practices.
+    Investigates the repository using deterministic AST analysis + Git history check.
     Returns: {"evidences": {"repo": [Evidence, Evidence, ...]}}
     """
     repo_url = state['repo_url']
     evidences: List[Evidence] = []
-    rubric = _load_rubric()
     
-    # Filter dimensions for this detective
-    dims = [d for d in rubric.get("dimensions", []) if d["target_artifact"] == "github_repo"]
+    print(f"DEBUG: RepoInvestigator starting deterministic analysis for {repo_url}")
 
     try:
-        # Clone repo
         with clone_repo(repo_url) as temp_dir:
-            
-            # --- Protocol A: Forensic Evidence Collection ---
-            
             # 1. Git Forensic Analysis
-            history = extract_git_history(temp_dir)
-            found_history = len(history) > 3 # Success pattern > 3
-            content = f"Commits: {len(history)}. " + (f"Range: {history[-1]['timestamp']} -> {history[0]['timestamp']}. Msg: {history[0]['message']}" if history else "")
+            try:
+                git_history = extract_git_history(temp_dir)
+                has_progression = len(git_history) > 3
+                evidences.append(Evidence(
+                    goal="Git Forensic Analysis",
+                    found=has_progression,
+                    content=f"Found {len(git_history)} commits. First: {git_history[-1]['message'] if git_history else 'None'}, Last: {git_history[0]['message'] if git_history else 'None'}",
+                    location=".git",
+                    rationale="More than 3 commits usually indicates iterative development.",
+                    confidence=1.0
+                ))
+            except Exception as e:
+                print(f"DEBUG: Git history extraction failed: {e}")
             
-            evidences.append(Evidence(
-                goal="Git Forensic Analysis",
-                found=found_history,
-                content=content,
-                location=".git",
-                rationale="Analyzed git log for progression story.",
-                confidence=1.0
-            ))
-
-            # 2. Graph Orchestration & State Management (combined AST analysis)
-            struct_findings = analyze_graph_structure(temp_dir)
+            # 2. AST Analysis
+            ast_findings = analyze_graph_structure(temp_dir)
             
             # State Management
-            st_len = len(struct_findings.get("state_graph_instantiations", []))
+            state_data = ast_findings.get("State Management Rigor")
             evidences.append(Evidence(
                 goal="State Management Rigor",
-                found=st_len > 0,
-                content=f"Found {st_len} StateGraph instantiations.",
+                found=state_data["found"],
+                content="\n".join(state_data["evidence"][:5]) if state_data["evidence"] else "No TypedDict or BaseModel specific to state found.", 
                 location="Source Code",
-                rationale="Parsed AST for StateGraph calls.",
-                confidence=1.0
+                rationale="AST analysis checked for TypedDict and Pydantic BaseModel definitions.",
+                confidence=0.9
             ))
             
-            # Graph Orchestration (Fan-out/Fan-in)
-            # We look for add_edge calls as a proxy for structure
-            edges_len = len(struct_findings.get("add_edge_calls", []))
+            # Graph Orchestration
+            graph_data = ast_findings.get("Graph Orchestration Architecture")
             evidences.append(Evidence(
                 goal="Graph Orchestration Architecture",
-                found=edges_len > 0,
-                content=f"Found {edges_len} add_edge calls. Parallel execution signature detected.",
+                found=graph_data["found"],
+                content="\n".join(graph_data["evidence"][:10]) if graph_data["evidence"] else "No StateGraph instantiation found.", # Increased limit to show conditional edges
                 location="Source Code",
-                rationale="Parsed AST for edge definitions.",
+                rationale="AST analysis checked for StateGraph, branching, and conditional edges.",
                 confidence=0.9
             ))
 
-            # 3. Safe Tool Engineering & Structured Output
-            # Harder to detect without deeper AST or file search. 
-            # We'll rely on generalized 'safe_tool_engineering' check if possible or leave for manual review.
-            # For now, we assume the AST parser gives us basic structure.
+            # Structured Output
+            struct_data = ast_findings.get("Structured Output Enforcement")
+            evidences.append(Evidence(
+                goal="Structured Output Enforcement",
+                found=struct_data["found"],
+                content="\n".join(struct_data["evidence"][:5]) if struct_data["evidence"] else "No .with_structured_output usage found.",
+                location="Source Code",
+                rationale="AST analysis checked for .with_structured_output() method calls.",
+                confidence=0.9
+            ))
             
+            # Safe Tool Engineering
+            safe_data = ast_findings.get("Safe Tool Engineering")
+            evidences.append(Evidence(
+                goal="Safe Tool Engineering",
+                found=safe_data["found"],
+                content="\n".join(safe_data["evidence"][:5]) if safe_data["evidence"] else "No unsafe constructs (os.system) found.",
+                location="Source Code",
+                rationale="Scanned for raw 'os.system' calls which are unsafe.",
+                confidence=0.8
+            ))
+
+            # File Structure Checks
+            has_judges = any("judges.py" in f for root, _, files in os.walk(temp_dir) for f in files)
+            evidences.append(Evidence(
+                goal="Judicial Nuance and Dialectics",
+                found=has_judges,
+                content=f"Found 'judges.py': {has_judges}",
+                location="File Structure",
+                rationale="Presence of 'judges.py' suggests judicial component.",
+                confidence=0.6
+            ))
+            
+            has_justice = any("justice.py" in f for root, _, files in os.walk(temp_dir) for f in files)
+            evidences.append(Evidence(
+                goal="Chief Justice Synthesis Engine",
+                found=has_justice,
+                content=f"Found 'justice.py': {has_justice}",
+                location="File Structure",
+                rationale="Presence of 'justice.py' suggests synthesis engine.",
+                confidence=0.6
+            ))
+
     except Exception as e:
         evidences.append(Evidence(
-            goal="Access Repository",
+            goal="Repo Access",
             found=False,
             content=f"Error accessing or analyzing repo: {str(e)}",
             location="Remote",
@@ -84,12 +208,14 @@ def repo_investigator(state: AgentState) -> Dict[str, Any]:
             confidence=0.0
         ))
 
+    # LOGGING
+    print(f"Detective: repo_investigator returns {json.dumps({'evidences': {'repo': [e.model_dump() for e in evidences]}}, default=str)}")
+
     return {"evidences": {"repo": evidences}}
 
 def doc_analyst(state: AgentState) -> Dict[str, Any]:
     """
-    Analyzes the documentation (PDF) for key concepts using semantic chunking.
-    Returns: {"evidences": {"doc": [Evidence, Evidence, ...]}}
+    Analyzes the documentation (PDF) using LLM to verify rubric compliance.
     """
     pdf_path = state.get('pdf_path')
     evidences: List[Evidence] = []
@@ -98,100 +224,246 @@ def doc_analyst(state: AgentState) -> Dict[str, Any]:
     
     if not pdf_path:
         evidences.append(Evidence(
-            goal="Read Documentation",
+            goal="Documentation Check",
             found=False,
             content="No PDF path provided.",
-            location="Input",
-            rationale="Missing input parameter.",
-            confidence=0.0
+            location="args",
+            rationale="User did not provide --pdf argument.",
+            confidence=1.0
         ))
+        
+        # LOGGING
+        print(f"Detective: doc_analyst returns {json.dumps({'evidences': {'doc': [e.model_dump() for e in evidences]}}, default=str)}")
         return {"evidences": {"doc": evidences}}
 
     try:
-        # Ingest and Chunk
         chunks = ingest_pdf_and_chunk(pdf_path)
         
-        # 1. Theoretical Depth
-        terms = ["Metacognition", "Dialectical Synthesis", "Fan-In", "Fan-Out", "State Synchronization"]
-        found_terms = []
-        for term in terms:
-            matches = query_chunks(chunks, term, top_k=1)
-            if matches:
-                 found_terms.append(f"{term}: Found")
+        # Combine chunks
+        doc_text = ""
+        for chunk in chunks:
+            if isinstance(chunk, dict):
+                 doc_text += chunk.get("text", str(chunk)) + "\n"
+            elif hasattr(chunk, 'page_content'):
+                doc_text += chunk.page_content + "\n"
             else:
-                 found_terms.append(f"{term}: Missing")
+                doc_text += str(chunk) + "\n"
         
-        evidences.append(Evidence(
-            goal="Theoretical Depth",
-            found="Missing" not in str(found_terms),
-            content=", ".join(found_terms),
-            location="PDF Content",
-            rationale="Semantic search for architectural concepts.",
-            confidence=1.0
-        ))
+        if len(doc_text) > 30000:
+            doc_text = doc_text[:30000] + "... [TRUNCATED]"
 
-        # 2. Report Accuracy (Cross Check)
-        # We search for file path mentions like 'src/...'
-        # This requires REGEX on chunks text.
-        # Simplification: We already analyzed repo in another node, but we don't have access to repo evidence here easily without state passing 
-        # (EvidenceAggregator handles the cross-ref synthesis, or Judges do).
-        # We will just collect the CLAIMED paths here.
+        llm = get_model()
         
-        evidences.append(Evidence(
-            goal="Report Accuracy",
-            found=True, # Found the content to check
-            content="Extracted architectural claims for cross-referencing.",
-            location="PDF Content",
-            rationale="Ready for verification by Judges (Rule of Evidence).",
-            confidence=1.0
-        ))
-        
+        for dim in dims:
+            prompt = f"""
+            You are an expert Auditor.
+            SEARCH CONTEXT for evidence matching the dimension: {dim['name']}
+            Success Pattern: {dim['success_pattern']}
+            
+            CONTEXT:
+            {doc_text}
+            
+            Instructions:
+            Does the doc meet the Success Pattern? Extract a quote.
+            
+            Output JSON:
+            {{ "evidences": [ {{ "goal": "{dim['name']}", "found": true, "content": "quote", "location": "PDF", "rationale": "reason", "confidence": 0.95 }} ] }}
+            """
+            
+            messages = [
+                SystemMessage(content="You are a JSON generator. Output ONLY valid JSON."),
+                HumanMessage(content=prompt)
+            ]
+            
+            llm_to_use = llm
+            try:
+                if hasattr(llm, "bind"):
+                        if "Ollama" in str(type(llm)):
+                            llm_to_use = llm.bind(format="json")
+                        elif "OpenAI" in str(type(llm)):
+                            llm_to_use = llm.bind(response_format={"type": "json_object"})
+            except:
+                pass
+
+            try:
+                response = llm_to_use.invoke(messages)
+                content = response.content
+                
+                # Robust JSON extraction
+                json_str = content.strip()
+                if "```json" in json_str:
+                    json_str = json_str.split("```json")[1]
+                if "```" in json_str:
+                    json_str = json_str.split("```")[0]
+                    
+                start_idx = json_str.find("{")
+                end_idx = json_str.rfind("}")
+                if start_idx != -1 and end_idx != -1:
+                    json_str = json_str[start_idx:end_idx+1]
+                
+                data = json.loads(json_str)
+                
+                if isinstance(data, dict):
+                        evidences_list = data.get("evidences", [])
+                        if not evidences_list and "goal" in data:
+                            evidences_list = [data]
+                elif isinstance(data, list):
+                    evidences_list = data
+                else:
+                    evidences_list = []
+                
+                for item in evidences_list:
+                    evidences.append(Evidence(
+                        goal=item.get("goal", dim['name']),
+                        found=item.get("found", False),
+                        content=str(item.get("content", "No content provided")),
+                        location=item.get("location", "PDF"),
+                        rationale=item.get("rationale", "No rationale provided"),
+                        confidence=float(item.get("confidence", 0.5))
+                    ))
+            except Exception:
+                pass
+                
     except Exception as e:
-         evidences.append(Evidence(
-            goal="Read Documentation",
+        evidences.append(Evidence(
+            goal="Doc Analysis",
             found=False,
-            content=f"Error processing PDF: {str(e)}",
-            location="PDF File",
-            rationale="Failed to ingest or chunk PDF.",
+            content=f"Error analyzing docs: {str(e)}",
+            location="Docs",
+            rationale="Failed to ingest PDF.",
             confidence=0.0
         ))
+        
+    # LOGGING
+    print(f"Detective: doc_analyst returns {json.dumps({'evidences': {'doc': [e.model_dump() for e in evidences]}}, default=str)}")
 
     return {"evidences": {"doc": evidences}}
 
 def vision_inspector(state: AgentState) -> Dict[str, Any]:
     """
-    Vision Inspector: Inspects visual artifacts (diagrams, images).
+    Analyzes visual diagrams in the repository AND the PDF report.
+    Only processes up to 3 images from each source to conserve tokens.
     """
+    repo_url = state.get("repo_url")
+    pdf_path = state.get("pdf_path")
     evidences: List[Evidence] = []
-    # Rubric: "Architectural Diagram Analysis"
     
-    evidences.append(Evidence(
-        goal="Architectural Diagram Analysis",
-        found=False,
-        content="Vision analysis skipped (execution optional).",
-        location="Diagrams",
-        rationale="Vision Inspector implementation placeholder.",
-        confidence=0.5
-    ))
+    # 1. PDF Image Analysis (Priority)
+    if pdf_path:
+        try:
+            pdf_images = extract_images_from_pdf(pdf_path, max_images=3)
+            if pdf_images:
+                llm = get_model()
+                for img in pdf_images:
+                    try:
+                        messages = [
+                            SystemMessage(content="You are a Vision Inspector. Analyze this technical diagram from an audit report."),
+                            HumanMessage(content=[
+                                {"type": "text", "text": "Is this a StateGraph diagram or a generic box diagram? Describe the node connections and structure."},
+                                {"type": "image_url", "image_url": {"url": f"data:{img['mime_type']};base64,{img['base64']}"}}
+                            ])
+                        ]
+                        
+                        response = llm.invoke(messages)
+                        
+                        evidences.append(Evidence(
+                            goal="Structure Verification",
+                            found=True,
+                            content=f"PDF Page {img['page']} Image Analysis: {response.content[:300]}...",
+                            location=f"PDF/Page-{img['page']}",
+                            rationale="Vision analysis of PDF diagrams.",
+                            confidence=0.9
+                        ))
+                    except Exception as e:
+                        print(f"Failed to analyze PDF image: {e}")
+            else:
+                 evidences.append(Evidence(
+                    goal="Visual Clarity",
+                    found=False,
+                    content="No images extracted from PDF.",
+                    location="PDF",
+                    rationale="PDF parsing yielded no image objects.",
+                    confidence=0.5
+                ))
+        except Exception as e:
+             print(f"PDF extraction error: {e}")
+
+    # 2. Repo Image Analysis (Secondary)
+    if not repo_url:
+        evidences.append(Evidence(
+            goal="Visual Check",
+            found=False,
+            content="No repo URL provided.",
+            location="args",
+            rationale="Cannot inspect images without access.",
+            confidence=1.0
+        ))
+    else:
+
+        try:
+         with clone_repo(repo_url) as temp_dir:
+            image_files = []
+            for root, _, files in os.walk(temp_dir):
+                for file in files:
+                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                         image_files.append(os.path.join(root, file))
+            
+            if not image_files:
+                evidences.append(Evidence(
+                    goal="Design Diagrams",
+                    found=False,
+                    content="No image files found in repository.",
+                    location="Repository",
+                    rationale="Scanned for .png, .jpg, .jpeg, .gif.",
+                    confidence=1.0
+                ))
+            else:
+                # Limit to first 3 images
+                llm = get_model() # Assuming gpt-4o or capable model
+                
+                for img_path in image_files[:3]:
+                    try:
+                        mime_type, _ = mimetypes.guess_type(img_path)
+                        if not mime_type:
+                            mime_type = "image/png"
+                            
+                        with open(img_path, "rb") as image_file:
+                            base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+                        
+                        messages = [
+                            SystemMessage(content="You are a Vision Inspector. Analyze this technical diagram or screenshot."),
+                            HumanMessage(content=[
+                                {"type": "text", "text": "Describe the architectural components, flow, or UI elements in this image. Does it look professional?"},
+                                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}}
+                            ])
+                        ]
+                        
+                        response = llm.invoke(messages)
+                        filename = os.path.basename(img_path)
+                        
+                        evidences.append(Evidence(
+                            goal="Visual Clarity",
+                            found=True,
+                            content=f"Image {filename} Analysis: {response.content[:200]}...",
+                            location=f"Images/{filename}",
+                            rationale="Vision model analysis of repository asset.",
+                            confidence=0.8
+                        ))
+                    except Exception as e:
+                        print(f"Failed to analyze image {img_path}: {e}")
+                        
+        except Exception as e:
+            evidences.append(Evidence(
+                goal="Vision Analysis",
+                found=False,
+                content=f"Error accessing repo for vision check: {str(e)}",
+                location="Remote",
+                rationale="Failed to clone or read images.",
+                confidence=0.0
+            ))
+            
+    # LOGGING
+    print(f"Detective: vision_inspector returns {json.dumps({'evidences': {'vision': [e.model_dump() for e in evidences]}}, default=str)}")
     
     return {"evidences": {"vision": evidences}}
-    #     evidences.append(Evidence(
-    #         goal="Find Concept: Dialectical Synthesis",
-    #         found=res_synthesis["found"],
-    #         content=res_synthesis["details"],
-    #         location="PDF Content",
-    #         rationale="Keyword search in extracted text.",
-    #         confidence=1.0
-    #     ))
-        
-    # except Exception as e:
-    #      evidences.append(Evidence(
-    #         goal="Process PDF Document",
-    #         found=False,
-    #         content=f"Error processing PDF: {str(e)}",
-    #         location="PDF Processor",
-    #         rationale="Exception occurred during extraction.",
-    #         confidence=0.0
-    #     ))
-         
-    # return {"evidences": {"doc": evidences}}
+     

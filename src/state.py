@@ -11,7 +11,7 @@ class Evidence(BaseModel):
     confidence: float
 
 class JudicialOpinion(BaseModel):
-    judge: Literal["Prosecutor", "Defense", "TechLead"]
+    judge: str # Relaxed to allow dynamic roles like DebateModerator
     criterion_id: str
     score: int = Field(ge=1, le=5)
     argument: str
@@ -37,3 +37,6 @@ class AgentState(TypedDict):
     evidences: Annotated[Dict[str, List[Evidence]], operator.ior]
     opinions: Annotated[List[JudicialOpinion], operator.add]
     final_report: Optional[AuditReport]
+    debated: Optional[bool] # Conflict resolution flag
+    missing_artifacts: Optional[List[str]]
+    errors: Optional[bool]

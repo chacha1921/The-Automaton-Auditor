@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+import datetime
 from dotenv import load_dotenv
 
 # Load env variables
@@ -9,27 +10,115 @@ load_dotenv()
 from src.graph import app
 from src.state import AgentState, AuditReport
 
+def generate_markdown_report(report: AuditReport, evidences: dict, opinions: list, output_dir: str = "audit/report_onpeer_generated"):
+    """
+    Generates a comprehensive markdown report and saves it to the specified directory.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create filename based on repo name and timestamp
+    # Handle repo name if it's a URL
+    repo_name_safe = report.repo_name.replace("https://github.com/", "").replace("/", "_")
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{output_dir}/{repo_name_safe}_audit_report_{timestamp}.md"
+    
+    md = f"# Automation Auditor Report\n\n"
+    md += f"**Repository:** {report.repo_name}\n"
+    md += f"**Date:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    md += f"**Total Score:** {report.total_score}/5.0\n\n"
+    
+    md += "## Executive Summary\n"
+    md += f"{report.summary}\n\n"
+    
+    md += "## Criterion Breakdown\n"
+    if report.criterion_results:
+        for res in report.criterion_results:
+            md += f"### {res.criterion}\n"
+            md += f"- **Score:** {res.score}/5.0\n"
+            md += f"- **Verdict:** {res.reasoning}\n\n"
+            
+            md += "#### Judge Opinions\n"
+            # Filter opinions for this criterion
+            relevant_opinions = [op for op in opinions if op.criterion_id == res.criterion or op.criterion_id == "Overall"]
+            
+            if relevant_opinions:
+                for op in relevant_opinions:
+                     md += f"- **{op.judge}** (Score {op.score}): {op.argument}\n"
+                     if op.cited_evidence:
+                        md += f"  - *Evidence:* {', '.join(op.cited_evidence)}\n"
+            else:
+                md += "_No specific opinions recorded for this criterion._\n"
+            md += "\n"
+            
+    md += "## Remediation Plan\n"
+    if report.recommendations:
+        md += "Based on the findings, the following actions are recommended:\n\n"
+        for rec in report.recommendations:
+            # Attempt to group/format if possible, otherwise list
+            md += f"- [ ] {rec}\n"
+    
+    md += "\n---\n"
+    md += "## Full Audit Details\n\n"
+    
+    md += "### 1. Evidence Collected\n"
+    if evidences:
+        for category, items in evidences.items():
+            md += f"#### Category: {category}\n"
+            for item in items:
+                status = "✅ Found" if item.found else "❌ Not Found"
+                md += f"- **Goal:** {item.goal}\n"
+                md += f"  - **Status:** {status}\n"
+                md += f"  - **Location:** `{item.location}`\n"
+                md += f"  - **Rationale:** {item.rationale}\n"
+                if item.content:
+                    md += f"  - **Content Snippet:**\n\n```\n{item.content}\n```\n"
+                else:
+                    md += f"  - **Content Snippet:** N/A\n\n"
+    else:
+        md += "_No evidence collected._\n\n"
+
+    md += "### 2. Judicial Opinions\n"
+    if opinions:
+        for op in opinions:
+            md += f"#### Judge: {op.judge}\n"
+            md += f"- **Criterion:** {op.criterion_id}\n"
+            md += f"- **Score:** {op.score}\n"
+            md += f"- **Argument:** {op.argument}\n"
+            if op.cited_evidence:
+                md += f"- **Cited Evidence:** {', '.join(op.cited_evidence)}\n"
+            md += "\n"
+    else:
+        md += "_No judicial opinions recorded._\n\n"
+
+    with open(filename, "w") as f:
+        f.write(md)
+        
+    print(f"\n[SUCCESS] Markdown report saved to: {filename}")
+
 def main():
     parser = argparse.ArgumentParser(description="The Automation Auditor: Analyze Repositories and Documentation.")
     parser.add_argument("--repo", type=str, required=True, help="URL of the GitHub repository to audit.")
-    parser.add_argument("--pdf", type=str, required=True, help="Path to the PDF documentation.")
+    parser.add_argument("--pdf", type=str, required=False, help="Path to the PDF documentation (Optional).")
     
     args = parser.parse_args()
     
     repo_url = args.repo
     pdf_path = args.pdf
     
-    if not os.path.exists(pdf_path):
+    if pdf_path and not os.path.exists(pdf_path):
         print(f"Error: PDF file not found at {pdf_path}")
         sys.exit(1)
 
     print(f"Starting Audit for Repo: {repo_url}")
-    print(f"Analyzing PDF: {pdf_path}")
+    if pdf_path:
+        print(f"Analyzing PDF: {pdf_path}")
+    else:
+        print("Note: No PDF provided. Skipping documentation analysis.")
     print("-" * 50)
 
     initial_state = {
         "repo_url": repo_url,
-        "pdf_path": pdf_path,
+        "pdf_path": pdf_path or "", # Use empty string if None to avoid key errors if typed that way
         "rubric_dimensions": ["Completeness", "Architecture", "Best Practices"],
         "evidences": {},
         "opinions": [],
@@ -37,11 +126,45 @@ def main():
     }
 
     try:
-        # Run the graph
-        # Using .invoke() for simplicity, or .stream() if we want updates.
+        # Run the graph with streaming to see node outputs
+        print("\n=== EXECUTION LOG ===")
         
-        # Invoke is simpler for terminal output collection if stream is noisy
-        final_state = app.invoke(initial_state)
+        # We need to capture the final state for the report
+        final_state = initial_state
+        
+        # Use stream to print node outputs
+        for event in app.stream(initial_state):
+            for node, output in event.items():
+                print(f"\n--- Node Completed: {node} ---")
+                
+                if not output:
+                    continue
+
+                # Update final state as we go
+                if isinstance(output, dict):
+                    final_state.update(output)
+                
+                # Special handling for Detectives (Evidence)
+                if "evidences" in output:
+                    evs = output["evidences"]
+                    for category, items in evs.items():
+                        print(f"  [Evidence Found]: Category '{category}' - {len(items)} item(s)")
+                        for item in items:
+                            # Print a snippet of the content
+                            snippet = item.content[:100].replace('\n', ' ') + "..." if item.content else "No content"
+                            print(f"    - Found: {item.found} | Location: {item.location} | Snippet: {snippet}")
+
+                # Special handling for Judges (Opinions)
+                if "opinions" in output:
+                    for op in output["opinions"]:
+                        print(f"  [Judicial Opinion]: {op.judge}")
+                        print(f"    - Criterion: {op.criterion_id} | Score: {op.score} | Argument: {op.argument[:100]}...")
+
+                # Special handling for Justice (Report)
+                if "final_report" in output and output["final_report"]:
+                     print("  [Justice]: Final Report Generated.")
+
+        print("\n=== EXECUTION COMPLETE ===")
         
         report: AuditReport = final_state.get("final_report")
         
@@ -65,9 +188,42 @@ def main():
                print("\nRecommendations:")
                for rec in report.recommendations:
                    print(f"  * {rec}")
+           
+           print("\n" + "="*50)
+           print("FULL AUDIT DETAILS (EVIDENCES & OPINIONS)")
            print("="*50)
-        else:
-           print("Error: No Final Report Generated.")
+           
+           # Print All Evidence
+           evidences = final_state.get("evidences", {})
+           if evidences:
+               print("\n--- Gathered Evidence ---")
+               for category, items in evidences.items():
+                   print(f"\nCategory: {category}")
+                   for idx, item in enumerate(items, 1):
+                        print(f"  {idx}. [Found: {item.found}] {item.goal}")
+                        print(f"     Location: {item.location}")
+                        print(f"     Rationale: {item.rationale}")
+                        print(f"     Confidence: {item.confidence}")
+
+           # Print All Opinions
+           opinions = final_state.get("opinions", [])
+           if opinions:
+               print("\n--- Judicial Opinions ---")
+               for op in opinions:
+                   print(f"\nJudge: {op.judge}")
+                   print(f"  - Criterion: {op.criterion_id} (Score: {op.score})")
+                   print(f"    Argument: {op.argument}")
+                   print(f"    Cited Evidence: {op.cited_evidence}")
+
+           print("="*50)
+           
+           # Generate Markdown Report
+           print(f"\n[INFO] Saving final report...")
+           generate_markdown_report(report, evidences, opinions, "audit/report_onpeer_generated")
+           
+           # LangSmith Link Hint
+           if os.getenv("LANGCHAIN_TRACING_V2") == "true":
+               print("\n[INFO] Trace available in LangSmith project:", os.getenv("LANGCHAIN_PROJECT"))
 
     except Exception as e:
         print(f"Fatal Error during execution: {e}")

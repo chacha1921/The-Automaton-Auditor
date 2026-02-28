@@ -3,7 +3,7 @@ from langgraph.graph import StateGraph, START, END
 from src.state import AgentState, AuditReport, CriterionResult, Evidence
 from src.nodes.detectives import repo_investigator, doc_analyst, vision_inspector
 from src.nodes.judges import prosecutor_node, defense_node, tech_lead_node
-from src.nodes.justice import chief_justice_node
+from src.nodes.justice import chief_justice_node, debate_node
 
 def evidence_aggregator(state: AgentState) -> Dict[str, Any]:
     """Aggregate evidence and detect missing artifacts or failures.
@@ -62,7 +62,8 @@ def create_graph():
     
     # Justice
     graph_builder.add_node("ChiefJustice", chief_justice_node)
-    
+    graph_builder.add_node("Debate", debate_node)
+
     # Add Edges
     # Fan-out to Detectives
     graph_builder.add_edge(START, "RepoInvestigator")
@@ -80,22 +81,6 @@ def create_graph():
             return "ErrorHandler"
         return "JudicialFanOut"
 
-    graph_builder.add_conditional_edges(
-        "EvidenceAggregator",
-        check_routing,
-        {
-            "ErrorHandler": "ErrorHandler",
-            "JudicialFanOut": "Prosecutor" # We start at Prosecutor, need parallel
-        }
-    )
-    
-    # LangGraph conditional edge returns ONE destination. 
-    # To fan out conditionally, we usually return a list or use "map".
-    # Since standard conditional edge returns a string, we route to a node that fans out OR route to the first node and let them run parallel.
-    # WAIT: START -> [A, B] runs parallel. 
-    # Can we do `builder.add_edge("Aggregator", "A")` AND `builder.add_edge("Aggregator", "B")`?
-    # Yes, but that's unconditional.
-    # We need conditional.
     # Solution: Route to a dummy "JudicialStart" node conditionally, then unconditional edges fan out.
     
     def judicial_start_node(state: AgentState):
@@ -124,8 +109,35 @@ def create_graph():
     graph_builder.add_edge("TechLead", "ChiefJustice")
     
     graph_builder.add_edge("ErrorHandler", "ChiefJustice")
-    graph_builder.add_edge("ChiefJustice", END)
     
-    return graph_builder
+    # New Edge: Debate Loop
+    graph_builder.add_edge("Debate", "ChiefJustice")
+    
+    # Conditional Routing for Conflict
+    def check_conflict(state: AgentState):
+        opinions = state.get("opinions", [])
+        if not opinions:
+            return END
+            
+        scores = [op.score for op in opinions]
+        # Calculate variance
+        variance = max(scores) - min(scores) if scores else 0
+        
+        # If variance > 2 and NOT yet debated, route to Debate
+        if variance > 2 and not state.get("debated"):
+            return "Debate"
+            
+        return END
+
+    graph_builder.add_conditional_edges(
+        "ChiefJustice",
+        check_conflict,
+        {
+            "Debate": "Debate",
+            END: END
+        }
+    )
+    
+    return graph_builder.compile()
 
 app = create_graph()
