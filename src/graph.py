@@ -1,9 +1,9 @@
 from typing import Dict, Any, List
 from langgraph.graph import StateGraph, START, END
-from src.state import AgentState, AuditReport, CriterionResult
-from src.nodes.detectives import repo_investigator, doc_analyst
-from src.judges.bench import prosecutor_node, defense_node, tech_lead_node
-
+from src.state import AgentState, AuditReport, CriterionResult, Evidence
+from src.nodes.detectives import repo_investigator, doc_analyst, vision_inspector
+from src.nodes.judges import prosecutor_node, defense_node, tech_lead_node
+from src.nodes.justice import chief_justice_node
 
 def evidence_aggregator(state: AgentState) -> Dict[str, Any]:
     """Aggregate evidence and detect missing artifacts or failures.
@@ -22,27 +22,15 @@ def evidence_aggregator(state: AgentState) -> Dict[str, Any]:
         errors = True
         missing.append("pdf_path")
 
-    # Heuristic: any evidence item explicitly found==False signals a problem
-    for cat, ev_list in evidences.items():
-        try:
-            for ev in ev_list:
-                if getattr(ev, "found", None) is False:
-                    errors = True
-        except Exception:
-            # skip malformed entries
-            continue
-
+    # Heuristic: Critical failures only
+    # We don't error just because evidence was missed, but if required files are gone.
+    
     return {"errors": errors, "missing_artifacts": missing}
-
 
 def error_handler(state: AgentState) -> Dict[str, Any]:
     """Handle errors by creating a short remediation evidence entry and flagging manual review."""
-    if not state.get("errors"):
-        return {}
-
+    
     # Add a low-confidence evidence item to indicate failure and request manual review
-    from src.state import Evidence
-
     evid = Evidence(
         goal="Error Handling",
         found=False,
@@ -52,99 +40,92 @@ def error_handler(state: AgentState) -> Dict[str, Any]:
         confidence=0.0,
     )
 
-    return {"manual_review": True, "evidences": {"system": [evid]}}
+    return {"evidences": {"system": [evid]}}
 
+# --- Graph Definition ---
 
-def chief_justice_node(state: AgentState) -> Dict[str, Any]:
-    """Deterministic synthesis of opinions into an AuditReport.
+def create_graph():
+    graph_builder = StateGraph(AgentState)
 
-    This avoids depending on an LLM for the interim submission: it averages scores
-    and produces a short summary. Later we will replace this with an LLM-based
-    structured synthesis.
-    """
-    opinions = state.get("opinions", []) or []
-    repo = state.get("repo_url", "unknown")
+    # Add Nodes
+    graph_builder.add_node("RepoInvestigator", repo_investigator)
+    graph_builder.add_node("DocAnalyst", doc_analyst)
+    graph_builder.add_node("VisionInspector", vision_inspector)
+    
+    graph_builder.add_node("EvidenceAggregator", evidence_aggregator)
+    graph_builder.add_node("ErrorHandler", error_handler)
+    
+    # Judges
+    graph_builder.add_node("Prosecutor", prosecutor_node)
+    graph_builder.add_node("Defense", defense_node)
+    graph_builder.add_node("TechLead", tech_lead_node)
+    
+    # Justice
+    graph_builder.add_node("ChiefJustice", chief_justice_node)
+    
+    # Add Edges
+    # Fan-out to Detectives
+    graph_builder.add_edge(START, "RepoInvestigator")
+    graph_builder.add_edge(START, "DocAnalyst")
+    graph_builder.add_edge(START, "VisionInspector")
+    
+    # Fan-in to Aggregator
+    graph_builder.add_edge("RepoInvestigator", "EvidenceAggregator")
+    graph_builder.add_edge("DocAnalyst", "EvidenceAggregator")
+    graph_builder.add_edge("VisionInspector", "EvidenceAggregator")
+    
+    # Conditional Routing
+    def check_routing(state: AgentState):
+        if state.get("errors"):
+            return "ErrorHandler"
+        return "JudicialFanOut"
 
-    if not opinions:
-        report = AuditReport(
-            repo_name=repo,
-            total_score=0.0,
-            criterion_results=[],
-            summary="No judicial opinions were produced; manual review required.",
-            recommendations=["Rerun with all artifacts present."],
-        )
-        return {"final_report": report}
-
-    scores = [getattr(o, "score", 0) for o in opinions]
-    avg_score = sum(scores) / len(scores) if scores else 0.0
-
-    # Create simple criterion results placeholder
-    criterion_results: List[CriterionResult] = [
-        CriterionResult(
-            criterion="Overall",
-            score=avg_score,
-            reasoning="Aggregated from judicial opinions",
-            evidence_summary=f"{len(opinions)} opinions considered",
-        )
-    ]
-
-    summary = (
-        f"Synthesized {len(opinions)} opinions. Average score: {avg_score:.2f}."
-        + (" Errors were present; see manual review evidence." if state.get("errors") else "")
+    graph_builder.add_conditional_edges(
+        "EvidenceAggregator",
+        check_routing,
+        {
+            "ErrorHandler": "ErrorHandler",
+            "JudicialFanOut": "Prosecutor" # We start at Prosecutor, need parallel
+        }
+    )
+    
+    # LangGraph conditional edge returns ONE destination. 
+    # To fan out conditionally, we usually return a list or use "map".
+    # Since standard conditional edge returns a string, we route to a node that fans out OR route to the first node and let them run parallel.
+    # WAIT: START -> [A, B] runs parallel. 
+    # Can we do `builder.add_edge("Aggregator", "A")` AND `builder.add_edge("Aggregator", "B")`?
+    # Yes, but that's unconditional.
+    # We need conditional.
+    # Solution: Route to a dummy "JudicialStart" node conditionally, then unconditional edges fan out.
+    
+    def judicial_start_node(state: AgentState):
+        return {}
+    
+    graph_builder.add_node("JudicialStart", judicial_start_node)
+    
+    # Update conditional edge
+    graph_builder.add_conditional_edges(
+        "EvidenceAggregator",
+        check_routing,
+        {
+            "ErrorHandler": "ErrorHandler",
+            "JudicialFanOut": "JudicialStart" 
+        }
     )
 
-    report = AuditReport(
-        repo_name=repo,
-        total_score=avg_score,
-        criterion_results=criterion_results,
-        summary=summary,
-        recommendations=([] if avg_score >= 3.0 else ["Address major issues identified by judges."]),
-    )
+    # Fan Out to Judges
+    graph_builder.add_edge("JudicialStart", "Prosecutor")
+    graph_builder.add_edge("JudicialStart", "Defense")
+    graph_builder.add_edge("JudicialStart", "TechLead")
+    
+    # Fan In to Justice
+    graph_builder.add_edge("Prosecutor", "ChiefJustice")
+    graph_builder.add_edge("Defense", "ChiefJustice")
+    graph_builder.add_edge("TechLead", "ChiefJustice")
+    
+    graph_builder.add_edge("ErrorHandler", "ChiefJustice")
+    graph_builder.add_edge("ChiefJustice", END)
+    
+    return graph_builder
 
-    return {"final_report": report}
-
-
-# --- Graph Construction ---
-
-builder = StateGraph(AgentState)
-
-# Core detective nodes
-builder.add_node("repo_investigator", repo_investigator)
-builder.add_node("doc_analyst", doc_analyst)
-
-# Aggregator and error handler
-builder.add_node("evidence_aggregator", evidence_aggregator)
-builder.add_node("error_handler", error_handler)
-
-# Judicial nodes (they should inspect state and no-op if errors present)
-builder.add_node("prosecutor", prosecutor_node)
-builder.add_node("defense", defense_node)
-builder.add_node("tech_lead", tech_lead_node)
-
-# Synthesis
-builder.add_node("chief_justice", chief_justice_node)
-
-# Edges: START -> detectives (fan-out)
-builder.add_edge(START, "repo_investigator")
-builder.add_edge(START, "doc_analyst")
-
-# Detectives -> aggregator (fan-in)
-builder.add_edge("repo_investigator", "evidence_aggregator")
-builder.add_edge("doc_analyst", "evidence_aggregator")
-
-# Aggregator -> error handler (conditional by node logic) and -> judges
-builder.add_edge("evidence_aggregator", "error_handler")
-builder.add_edge("evidence_aggregator", "prosecutor")
-builder.add_edge("evidence_aggregator", "defense")
-builder.add_edge("evidence_aggregator", "tech_lead")
-
-# Judges -> Chief Justice (fan-in synthesis)
-builder.add_edge("prosecutor", "chief_justice")
-builder.add_edge("defense", "chief_justice")
-builder.add_edge("tech_lead", "chief_justice")
-
-# Chief Justice -> END
-builder.add_edge("chief_justice", END)
-
-# Compile graph
-graph = builder.compile()
+app = create_graph()

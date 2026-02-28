@@ -1,14 +1,28 @@
 # The Automation Auditor
 
-The Automation Auditor is a LangGraph-based framework designed to critically analyze code repositories and documentation for compliance, architectural soundness, and best practices.
+The Automation Auditor is a specialized LangGraph-based framework designed to critically analyze code repositories and documentation for compliance, architectural soundness, and best practices. It employs a multi-agent system mimicking a judicial process to evaluate submissions.
 
-## Overview (Interim Phase 1 & 2)
+## Architecture
 
-This repository contains the foundational "Detective Layer" of the auditing system. It employs a multi-agent architecture to inspect projects:
+The system operates in three distinct phases:
 
-- **RepoInvestigator**: Securely clones remote repositories, analyzes abstract syntax trees (AST) to identify LangGraph structures, and examines git commit history for atomic practices.
-- **DocAnalyst**: Ingests project documentation (PDF) and performs semantic checks for key conceptual frameworks like "Metacognition" and "Dialectical Synthesis".
-- **EvidenceAggregator**: A synchronization node that collects findings from all detectives for downstream processing.
+### 1. The Detective Layer (Forensics)
+- **RepoInvestigator**: Securely clones remote repositories, analyzes abstract syntax trees (AST) to identify LangGraph structures (`StateGraph`, `add_edge`), and examines git commit history for atomic practices.
+- **DocAnalyst**: Ingests project documentation (PDF) using semantic chunking and performs targeted queries for key conceptual frameworks like "Metacognition" and "Dialectical Synthesis".
+- **VisionInspector**: (Optional/Experimental) Scans for visual artifacts and diagrams.
+
+### 2. The Judicial Layer (Dialectics)
+Three specialized "Judges" review the aggregated evidence with distinct personas:
+- **The Prosecutor**: Assumes "vibe coding" and looks for flaws, security risks, and missing validations.
+- **The Defense Attorney**: Highlights effort, creative workarounds, and best practices.
+- **The Tech Lead**: Evaluates practical architectural soundness and maintainability.
+
+### 3. The Justice Layer (Synthesis)
+- **Chief Justice**: Synthesizes the opinions using deterministic conflict resolution rules:
+    - **Security Override**: Critical security flaws flagged by the Prosecutor cap the maximum score.
+    - **Fact Supremacy**: Opinions citing concrete evidence are weighed heavily.
+    - **Dissent Requirement**: Significant disagreement between judges is explicitly noted.
+    - Produces a final **AuditReport** with a score and actionable recommendations.
 
 ## Setup
 
@@ -26,14 +40,31 @@ This project uses `uv` for fast Python package management.
     ```
 
 3.  **Install dependencies**:
-    Create a virtual environment and sync dependencies:
+    Sync dependencies using the lockfile:
     ```bash
-    uv venv
-    source .venv/bin/activate
     uv sync
-    # Or manually install packages
-    uv pip install langgraph langchain langchain-openai pydantic python-dotenv docling
+    source .venv/bin/activate
     ```
+
+## Usage
+
+### Run an Audit
+
+Run the main script with the target repository URL and PDF report path:
+
+```bash
+# Ensure .env is configured with OPENAI_API_KEY
+uv run main.py --repo "https://github.com/username/target-repo" --pdf "path/to/report.pdf"
+```
+
+### Docker
+
+Build and run the containerized auditor:
+
+```bash
+docker build -t auditor .
+docker run --env-file .env auditor uv run main.py --repo "..." --pdf "..."
+```
 
 ## Configuration
 
@@ -48,6 +79,8 @@ This project uses `uv` for fast Python package management.
     ```ini
     LANGCHAIN_TRACING_V2=true
     LANGCHAIN_API_KEY=your_langchain_api_key_here
+    OPENAI_API_KEY=your_openai_key_here
+    ```
     LANGCHAIN_PROJECT=the-automation-auditor
     OPENAI_API_KEY=your_openai_api_key_here
     ```
