@@ -1,11 +1,61 @@
 from typing import Dict, List, Any
 import json
+import os
 from langchain_openai import ChatOpenAI
+try:
+    from langchain_ollama import ChatOllama
+except ImportError:
+    ChatOllama = None
+
 from langchain_core.messages import SystemMessage, HumanMessage
 from src.state import AgentState, JudicialOpinion, Evidence
 
 def _get_model():
-    return ChatOpenAI(model="gpt-4o", temperature=0)
+    """
+    Returns a configured Chat Model (OpenAI or Ollama) with optional fallback.
+    Reads from environment variables:
+    - JUDGE_PROVIDER: 'openai' (default) or 'ollama'
+    - JUDGE_MODEL: Model name
+    - JUDGE_FALLBACK_PROVIDER: Optional fallback provider
+    - JUDGE_FALLBACK_MODEL: Optional fallback model name
+    """
+    provider = os.getenv("JUDGE_PROVIDER", "openai").lower()
+    model_name = os.getenv("JUDGE_MODEL")
+    
+    primary_model = None
+
+    if provider == "ollama":
+        if not ChatOllama:
+            raise ImportError("langchain-ollama is not installed. Please run `pip install langchain-ollama`.")
+        target_model = model_name if model_name else "llama3.2:latest"
+        print(f"Using Primary Model: Ollama / {target_model}")
+        primary_model = ChatOllama(model=target_model, temperature=0)
+    else:
+        # Default to OpenAI
+        target_model = model_name if model_name else "gpt-4o"
+        print(f"Using Primary Model: OpenAI / {target_model}")
+        primary_model = ChatOpenAI(model=target_model, temperature=0)
+
+    # Configure Fallback
+    fallback_provider = os.getenv("JUDGE_FALLBACK_PROVIDER")
+    fallback_model_name = os.getenv("JUDGE_FALLBACK_MODEL")
+
+    if fallback_provider:
+        fallback_model = None
+        if fallback_provider.lower() == "ollama":
+             if ChatOllama:
+                fb_model = fallback_model_name if fallback_model_name else "llama3.2:latest"
+                print(f"Configuring Fallback Model: Ollama / {fb_model}")
+                fallback_model = ChatOllama(model=fb_model, temperature=0)
+        elif fallback_provider.lower() == "openai":
+            fb_model = fallback_model_name if fallback_model_name else "gpt-4o-mini"
+            print(f"Configuring Fallback Model: OpenAI / {fb_model}")
+            fallback_model = ChatOpenAI(model=fb_model, temperature=0)
+            
+        if fallback_model:
+            return primary_model.with_fallbacks([fallback_model])
+
+    return primary_model
 
 def _load_rubric():
     try:

@@ -8,6 +8,7 @@ dependencies = [
 	"langgraph",
 	"langchain",
 	"langchain-openai",
+	"langchain-ollama",
 	"pydantic",
 	"python-dotenv",
 	"gitingest",
