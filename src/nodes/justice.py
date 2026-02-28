@@ -104,32 +104,34 @@ def chief_justice_node(state: AgentState) -> Dict[str, Any]:
     # Prompt
     prompt = f"""
     You are the Chief Justice of the Automation Auditor Court.
-    Your task is to synthesize the final specific Verdict and Audit Report based on the opinions submitted by the Associate Judges (Prosecutor, Defense, TechLead).
+    Your task is to synthesize the final specific Verdict and Audit Report based on the opinions submitted by the Associate Judges (Prosecutor, Defense, TechLead, and potentially DebateModerator).
     
     INPUT OPINIONS:
     {context_str}
     
-    PRE-CALCULATED SCORE:
-    The deterministic weighted score for this audit is {deterministic_score:.2f}.
+    PRE-CALCULATED DETERMINISTIC SCORE:
+    The weighted score for this audit is {deterministic_score:.2f}.
     
-    INSTRUCTIONS:
-    1. Review all opinions. Acknowledge the conflict between Prosecutor and Defense.
-    2. Apply the "Standard of Evidence":
-       - Prefer opinions that cite specific code evidence.
-       - Acknowledge dissent if present.
-    3. Use the PRE-CALCULATED SCORE ({deterministic_score:.2f}) as the 'total_score' in your output. Do not hallucinate a different score.
-    4. Generate a list of concise Recommendations.
-    5. Write a Summary of the verdict.
+    RULES FOR SYNTHESIS (MANDATORY):
+    1. **Security Override**: ONLY if the Prosecutor EXPLICITLY mentions "os.system", "unsafe execution", or "security vulnerability" AND assigns a score of 1 or 2, then cap the total score at 4.0. If the Prosecutor gives a low score for "Orchestration" or "Structure" but admits the code is safe, DO NOT cap the score based on Security Override.
+    2. **Fact Supremacy**: Opinions that cite specific code evidence (e.g., 'Found os.system in file.py') must be weighed heavier than "vibe-based" opinions.
+    3. **Variance Handling**: If there is significant disagreement (>2 points diff), explicitly mention this dissent in the summary.
+    4. **Per-Criterion Drilldown**: Your 'criterion_results' MUST break down the verdict by the rubric dimensions provided in the arguments.
+    
+    OUTPUT INSTRUCTIONS:
+    1. Use the PRE-CALCULATED SCORE ({deterministic_score:.2f}) as a baseline, but apply the 'Security Override' rule if applicable. 
+    2. Generate a list of concise Recommendations based on the remediation steps suggested by the judges.
+    3. Write a Summary that synthesizes the divergent views.
     
     OUTPUT FORMAT:
     Return a valid JSON object matching this structure:
     {{
-        "total_score": {deterministic_score},
+        "total_score": float, 
         "criterion_results": [
             {{
-                "criterion": "Criterion Name (e.g., 'Security Analysis')",
+                "criterion": "Criterion Name",
                 "score": float,
-                "reasoning": "Synthesis of arguments for this dimension.",
+                "reasoning": "Synthesis of arguments. Explicitly mention if judges disagreed.",
                 "evidence_summary": "Key evidence cited."
             }},
             ...
@@ -140,7 +142,7 @@ def chief_justice_node(state: AgentState) -> Dict[str, Any]:
     """
     
     messages = [
-        SystemMessage(content="You are the Chief Justice. Synthesize a fair and evidence-based verdict. Output valid JSON only."),
+        SystemMessage(content="You are the Chief Justice. Synthesize a fair and evidence-based verdict following strict rules. Output valid JSON only."),
         HumanMessage(content=prompt)
     ]
     

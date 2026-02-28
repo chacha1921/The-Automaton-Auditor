@@ -25,7 +25,8 @@ def generate_markdown_report(report: AuditReport, evidences: dict, opinions: lis
     md = f"# Automation Auditor Report\n\n"
     md += f"**Repository:** {report.repo_name}\n"
     md += f"**Date:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-    md += f"**Total Score:** {report.total_score}/5.0\n\n"
+    # Round total score to 1 decimal place
+    md += f"**Total Score:** {report.total_score:.1f}/5.0\n\n"
     
     md += "## Executive Summary\n"
     md += f"{report.summary}\n\n"
@@ -34,7 +35,7 @@ def generate_markdown_report(report: AuditReport, evidences: dict, opinions: lis
     if report.criterion_results:
         for res in report.criterion_results:
             md += f"### {res.criterion}\n"
-            md += f"- **Score:** {res.score}/5.0\n"
+            md += f"- **Score:** {res.score:.1f}/5.0\n"
             md += f"- **Verdict:** {res.reasoning}\n\n"
             
             md += "#### Judge Opinions\n"
@@ -99,11 +100,13 @@ def main():
     parser = argparse.ArgumentParser(description="The Automation Auditor: Analyze Repositories and Documentation.")
     parser.add_argument("--repo", type=str, required=True, help="URL of the GitHub repository to audit.")
     parser.add_argument("--pdf", type=str, required=False, help="Path to the PDF documentation (Optional).")
+    parser.add_argument("--output", type=str, required=False, help="Path to save the generated report (Optional).")
     
     args = parser.parse_args()
     
     repo_url = args.repo
     pdf_path = args.pdf
+    output_path = args.output
     
     if pdf_path and not os.path.exists(pdf_path):
         print(f"Error: PDF file not found at {pdf_path}")
@@ -141,9 +144,27 @@ def main():
                     continue
 
                 # Update final state as we go
-                if isinstance(output, dict):
-                    final_state.update(output)
-                
+                for key, value in output.items():
+                    if key == "evidences":
+                        # Merge evidences
+                        if key not in final_state:
+                            final_state[key] = {} 
+                        if isinstance(value, dict):
+                            # Correctly handle dictionary merging for evidences
+                            for cat, items in value.items():
+                                if cat not in final_state[key]:
+                                    final_state[key][cat] = []
+                                final_state[key][cat].extend(items)
+                    elif key == "opinions":
+                        # Append opinions
+                        if key not in final_state: 
+                            final_state[key] = []
+                        if isinstance(value, list):
+                            final_state[key].extend(value)
+                    else:
+                        # For other keys (report, etc), update/overwrite is usually fine
+                        final_state[key] = value
+
                 # Special handling for Detectives (Evidence)
                 if "evidences" in output:
                     evs = output["evidences"]
@@ -216,10 +237,26 @@ def main():
                    print(f"    Cited Evidence: {op.cited_evidence}")
 
            print("="*50)
-           
+           if output_path:
+               output_directory = output_path
+               print(f"[CONFIG] Using provided output directory: {output_directory}")
+           else:
+               # If auditing my own repo, save to "audit/report_onself_generated"
+               # Otherwise, default to "audit/report_onpeer_generated"
+               
+               my_username = "chacha1921" # Adjust this to your GitHub username
+               target_repo = repo_url.lower()
+               
+               if my_username.lower() in target_repo:
+                   output_directory = "audit/report_onself_generated"
+                   print(f"[CONFIG] Detecting self-audit for user '{my_username}'. Output set to: {output_directory}")
+               else:
+                   output_directory = "audit/report_onpeer_generated"
+                   print(f"[CONFIG] Detecting peer-audit. Output set to: {output_directory}")
+
            # Generate Markdown Report
            print(f"\n[INFO] Saving final report...")
-           generate_markdown_report(report, evidences, opinions, "audit/report_onpeer_generated")
+           generate_markdown_report(report, evidences, opinions, output_directory)
            
            # LangSmith Link Hint
            if os.getenv("LANGCHAIN_TRACING_V2") == "true":

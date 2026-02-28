@@ -40,21 +40,22 @@ def analyze_graph_structure(path: str) -> Dict[str, Any]:
             file_path = os.path.join(root, file)
             try:
                 rel_path = os.path.relpath(file_path, path)
-            except ValueError:
-                rel_path = file_path
-            
-            try:
+                
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                     content = f.read()
-                
-                # Check for unsafe imports/usage
-                if "os.system" in content or "subprocess.run" in content:
-                    findings["Safe Tool Engineering"]["found"] = False
-                    findings["Safe Tool Engineering"]["evidence"].append(f"Potential unsafe execution in {rel_path}")
 
                 tree = ast.parse(content)
                 
                 for node in ast.walk(tree):
+                    # --- Safe Tool Engineering Check ---
+                    # Check for ACTUAL calls to os.system, effectively ignoring string literals checking for it
+                    if isinstance(node, ast.Call):
+                        if isinstance(node.func, ast.Attribute):
+                            # Case: os.system(...)
+                            if isinstance(node.func.value, ast.Name) and node.func.value.id == "os" and node.func.attr == "system":
+                                findings["Safe Tool Engineering"]["found"] = False
+                                findings["Safe Tool Engineering"]["evidence"].append(f"Unsafe 'os.system' call detected in {rel_path} line {node.lineno}")
+
                     # --- State Management Check ---
                     if isinstance(node, ast.ClassDef):
                         for base in node.bases:
@@ -99,6 +100,7 @@ def analyze_graph_structure(path: str) -> Dict[str, Any]:
                              findings["Structured Output Enforcement"]["evidence"].append(f"Found .bind_tools() in {rel_path} line {node.lineno}")
 
             except Exception as e:
+                # print(f"Error parsing {file_path}: {e}")
                 continue
                 
     return findings
@@ -168,14 +170,29 @@ def repo_investigator(state: AgentState) -> Dict[str, Any]:
             
             # Safe Tool Engineering
             safe_data = ast_findings.get("Safe Tool Engineering")
+            # If found=True (default in analyze_graph_structure), it means SAFE.
+            # But "found" usually means "Evidence Found". 
+            # Let's clarify the evidence goal.
+            
+            is_safe = safe_data["found"] # True if safe
+            
             evidences.append(Evidence(
                 goal="Safe Tool Engineering",
-                found=safe_data["found"],
-                content="\n".join(safe_data["evidence"][:5]) if safe_data["evidence"] else "No unsafe constructs (os.system) found.",
+                found=is_safe, 
+                content="\n".join(safe_data["evidence"][:5]) if not is_safe else "No unsafe constructs (os.system) found.",
                 location="Source Code",
                 rationale="Scanned for raw 'os.system' calls which are unsafe.",
                 confidence=0.8
             ))
+            
+            # --- CLARIFICATION FOR LLM ---
+            # If is_safe is True, we want the LLM to know this is GOOD.
+            # If found=True usually implies 'I found the problem' in a detective context, this is ambiguous.
+            # But here 'found' matches the 'goal'.
+            # If goal is 'Safe Tool Engineering', found=True means 'It IS Safe'.
+            # However, for 'Git Forensic Analysis', found=True means 'I found the history'.
+            # To avoid ambiguity, let's make the content explicit.
+
 
             # File Structure Checks
             has_judges = any("judges.py" in f for root, _, files in os.walk(temp_dir) for f in files)
