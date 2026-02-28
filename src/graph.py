@@ -18,9 +18,10 @@ def evidence_aggregator(state: AgentState) -> Dict[str, Any]:
     if not state.get("repo_url"):
         errors = True
         missing.append("repo_url")
-    if not state.get("pdf_path"):
-        errors = True
-        missing.append("pdf_path")
+    # PDF is optional now
+    # if not state.get("pdf_path"):
+    #     errors = True
+    #     missing.append("pdf_path")
 
     # Heuristic: Critical failures only
     # We don't error just because evidence was missed, but if required files are gone.
