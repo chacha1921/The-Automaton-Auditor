@@ -24,12 +24,15 @@ def _get_model():
     
     primary_model = None
 
+    # Determine Ollama Base URL (default is http://localhost:11434)
+    ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
     if provider == "ollama":
         if not ChatOllama:
             raise ImportError("langchain-ollama is not installed. Please run `pip install langchain-ollama`.")
         target_model = model_name if model_name else "llama3.2:latest"
-        print(f"Using Primary Model: Ollama / {target_model}")
-        primary_model = ChatOllama(model=target_model, temperature=0)
+        print(f"Using Primary Model: Ollama / {target_model} at {ollama_base_url}")
+        primary_model = ChatOllama(model=target_model, base_url=ollama_base_url, temperature=0)
     else:
         # Default to OpenAI
         target_model = model_name if model_name else "gpt-4o"
@@ -45,8 +48,8 @@ def _get_model():
         if fallback_provider.lower() == "ollama":
              if ChatOllama:
                 fb_model = fallback_model_name if fallback_model_name else "llama3.2:latest"
-                print(f"Configuring Fallback Model: Ollama / {fb_model}")
-                fallback_model = ChatOllama(model=fb_model, temperature=0)
+                print(f"Configuring Fallback Model: Ollama / {fb_model} at {ollama_base_url}")
+                fallback_model = ChatOllama(model=fb_model, base_url=ollama_base_url, temperature=0)
         elif fallback_provider.lower() == "openai":
             fb_model = fallback_model_name if fallback_model_name else "gpt-4o-mini"
             print(f"Configuring Fallback Model: OpenAI / {fb_model}")
