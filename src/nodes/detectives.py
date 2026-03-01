@@ -89,6 +89,29 @@ def analyze_graph_structure(path: str) -> Dict[str, Any]:
                             findings["Graph Orchestration Architecture"]["found"] = True
                             findings["Graph Orchestration Architecture"]["evidence"].append(f"Found CONDITIONAL EDGE in {rel_path} line {node.lineno} (Non-Linear Control Flow)")
 
+                    # --- Reducer Usage Check (Deep AST) ---
+                    if isinstance(node, ast.Subscript):
+                        # Check for Annotated[..., reducer]
+                        if isinstance(node.value, ast.Name) and node.value.id == "Annotated":
+                            if hasattr(node.slice, 'elts') and len(node.slice.elts) > 1: # Python < 3.9
+                                second_arg = node.slice.elts[1]
+                                if isinstance(second_arg, ast.Attribute) and second_arg.attr in ["add", "ior"]:
+                                     findings["State Management Rigor"]["found"] = True
+                                     findings["State Management Rigor"]["evidence"].append(f"Found Reducer '{second_arg.attr}' in {rel_path} line {node.lineno}")
+                            elif hasattr(node.slice, 'dims') and len(node.slice.dims) > 1: # Python >= 3.9 ? Not really, slice is usually tuple
+                                # AST for subscripts changed in 3.9, usually it's a Tuple node if multiple args
+                                pass
+                        # Python 3.9+ AST for Annotated[A, B] is Subscript(value=Name(Annotated), slice=Tuple(elts=[A, B]))
+                        if isinstance(node.slice, ast.Tuple):
+                             if isinstance(node.value, ast.Name) and node.value.id == "Annotated":
+                                 if len(node.slice.elts) > 1:
+                                     second_arg = node.slice.elts[1]
+                                     # Check for operator.add or similar
+                                     if isinstance(second_arg, ast.Attribute):
+                                          findings["State Management Rigor"]["found"] = True
+                                          findings["State Management Rigor"]["evidence"].append(f"Found Reducer '{second_arg.attr}' in {rel_path} line {node.lineno}")
+
+
                     # --- Structured Output Check ---
                     if isinstance(node, ast.Call):
                         func = node.func
@@ -448,9 +471,9 @@ def vision_inspector(state: AgentState) -> Dict[str, Any]:
                             base64_image = base64.b64encode(image_file.read()).decode('utf-8')
                         
                         messages = [
-                            SystemMessage(content="You are a Vision Inspector. Analyze this technical diagram or screenshot."),
+                            SystemMessage(content="You are a Vision Inspector. STRICTLY analyze this technical diagram."),
                             HumanMessage(content=[
-                                {"type": "text", "text": "Describe the architectural components, flow, or UI elements in this image. Does it look professional?"},
+                                {"type": "text", "text": "Is this a StateGraph diagram? I need to verify: 1. Are there parallel nodes (Fan-Out)? 2. Is there a synthesis/reducer node (Fan-In)? 3. Is it a professional UML or just a box diagram? Respond with specific architectural observations."},
                                 {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}}
                             ])
                         ]

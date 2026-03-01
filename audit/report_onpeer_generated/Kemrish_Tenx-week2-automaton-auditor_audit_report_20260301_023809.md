@@ -5,7 +5,17 @@
 **Total Score:** 3.6/5.0
 
 ## Executive Summary
-The system evaluation has yielded a total score of 3.57, with divergent views among the judges. The Defense judge scored 3 out of 5 for Overall, citing concerns about structured output enforcement and safe tool engineering practices.
+The system evaluation has yielded a total score of 3.57, with divergent views among the judges. The Defense judge scored 3 out of 5 for Overall, citing concerns about structured output enforcement and safe tool engineering practices. While the graph orchestration is visible, the implementation of synthesis logic requires attention.
+
+**Top Remaining Gaps:**
+1.  **Deterministic Logic:** The Chief Justice Synthesis Engine currently relies heavily on LLM prompts rather than deterministic Python logic for conflict resolution, as flagged by the TechLead.
+2.  **Safety Engineering:** Concerns were raised regarding "Safe Tool Engineering" practices, specifically the handling of potentially unsafe imports or system calls.
+3.  **Structured Output Enforcement:** While partially present, the rigor of Pydantic model usage throughout the graph state transitions is inconsistent.
+
+**Primary Remediation Priorities:**
+1.  **Implement Deterministic Scoring:** Refactor the `justice.py` node to calculate weighted scores and detect variance using pure Python functions before invoking the LLM for the narrative.
+2.  **Audit Tool Safety:** Review all tool definitions to ensure `os.system` and similar calls are strictly prohibited or sandboxed.
+3.  **Strengthen State Schema:** Enforce strict Pydantic validation at all graph node boundaries to eliminate dictionary-based state passing where possible.
 
 ## Criterion Breakdown
 ### Overall
