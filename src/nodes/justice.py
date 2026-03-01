@@ -1,7 +1,7 @@
 from typing import Dict, Any, List, Optional
 import json
 from langchain_core.messages import SystemMessage, HumanMessage
-from src.state import AgentState, AuditReport, CriterionResult, JudicialOpinion
+from src.state import AgentState, AuditReport, CriterionResult, JudicialOpinion, Evidence
 from src.utils.llm import get_model
 
 def calculate_weighted_score(opinions: List[JudicialOpinion]) -> float:
@@ -104,15 +104,50 @@ def detect_security_override(opinions: List[JudicialOpinion]) -> Optional[float]
     """
     Deterministic check for Security Override.
     If Prosecutor gives score <= 2 AND mentions 'security'/'unsafe'/'os.system',
-    return the CAP value (4.0). Otherwise return None.
+    return the CAP value (2.0 - Critical Failure). Otherwise return None.
     """
     for op in opinions:
         if op.judge == "Prosecutor" and op.score <= 2:
             arg_lower = op.argument.lower()
             if any(k in arg_lower for k in ["security", "unsafe", "os.system", "vulnerability", "malicious"]):
                 print("DEBUG: Security Override Triggered by Prosecutor")
-                return 4.0
+                return 2.0 # Cap at 2.0 for critical security failures
     return None
+
+def apply_fact_supremacy(criterion_scores: Dict[str, float], evidences: Dict[str, List[Evidence]]) -> List[str]:
+    """
+    Applies 'Fact Supremacy': If RepoInvestigator finds concrete evidence (AST/Code),
+    it overrides low scores based on missing docs or hallucinations.
+    Returns a list of override messages.
+    """
+    repo_evidences = evidences.get("repo", [])
+    overrides = []
+    
+    # Map Goals to Criterion Names (fuzzy match or direct map)
+    # The rubric usually aligns Goal -> Criterion
+    
+    for ev in repo_evidences:
+        if ev.found and ev.confidence > 0.8:
+            # Strong evidence found in Code
+            target_crit = None
+            
+            # Simple heuristic mapping based on goal keywords
+            if "Structured Output" in ev.goal:
+                 target_crit = "Structured Output Enforcement"
+            elif "State Management" in ev.goal:
+                 target_crit = "State Management Rigor"
+            elif "Safe Tool" in ev.goal:
+                 target_crit = "Safe Tool Engineering"
+            elif "Graph Orchestration" in ev.goal:
+                 target_crit = "Graph Orchestration Architecture"
+                 
+            if target_crit and target_crit in criterion_scores:
+                current_score = criterion_scores[target_crit]
+                if current_score < 4.0:
+                    criterion_scores[target_crit] = 5.0 # Facts override doubts
+                    overrides.append(f"Fact Supremacy: Boosted {target_crit} to 5.0 based on AST evidence.")
+                    
+    return overrides
 
 def detect_variance(opinions: List[JudicialOpinion]) -> List[str]:
     """
@@ -145,6 +180,26 @@ def chief_justice_node(state: AgentState) -> Dict[str, Any]:
     weighted_score = calculate_weighted_score(opinions)
     criterion_scores = calculate_criterion_scores(opinions)
     
+    # NEW: Fact Supremacy - Override scores based on AST Evidence
+    evidences = state.get("evidences", {}) or {}
+    # Combine all evidences into a flat list or handle nested struct
+    # Evidences is Annotated[Dict[str, List[Evidence]], operator.ior]
+    # So it's {"repo": List[Evidence], "doc": ...}
+    
+    all_repo_evidences = evidences.get("repo", [])
+    supremacy_msg = apply_fact_supremacy(criterion_scores, {"repo": all_repo_evidences})
+    
+    # Recalculate Weighted Score if needed, but for simplicity, we treat weighted_score as 'opinion average'
+    # and criterion_scores as 'final deterministic values'.
+    # If Fact Supremacy changed anything, we should reflect it in the final score.
+    # Simple average of criterion_scores might be better final score?
+    if supremacy_msg:
+        # Re-average
+        sum_scores = sum(criterion_scores.values())
+        count = len(criterion_scores)
+        if count > 0:
+            weighted_score = sum_scores / count # New baseline
+            
     # 2. Security Override Logic
     security_cap = detect_security_override(opinions)
     final_score = weighted_score
@@ -152,7 +207,7 @@ def chief_justice_node(state: AgentState) -> Dict[str, Any]:
     
     if security_cap is not None and weighted_score > security_cap:
         final_score = security_cap
-        override_msg = f"NOTE: Score capped at {security_cap} due to Security Protocol violation flagged by Prosecutor."
+        override_msg = f"CRITICAL: Score capped at {security_cap} due to Security Protocol violation flagged by Prosecutor."
         
     # 3. Variance Detection
     dissent_list = detect_variance(opinions)
@@ -187,6 +242,8 @@ def chief_justice_node(state: AgentState) -> Dict[str, Any]:
     llm = get_model()
     
     # Prompt - Now using PRE-COMPUTED values
+    supremacy_text = "\n".join(supremacy_msg) if supremacy_msg else "None"
+    
     prompt = f"""
     You are the Chief Justice. Synthesize the final Audit Report.
     
@@ -195,29 +252,32 @@ def chief_justice_node(state: AgentState) -> Dict[str, Any]:
     - Computed Criterion Scores: {criterion_scores_str}
     - Calculated Weighted Score: {weighted_score:.2f}
     - Security Override Status: {override_msg if override_msg else "None"}
+    - Fact Supremacy Applied: {supremacy_text}
     - Dissent Notices: {dissent_msg if dissent_msg else "None"}
     
     MANDATORY INSTRUCTIONS:
     1. Your Total Score IS DETERMINED as: {final_score:.2f}. Do not recalculate it.
     2. Write a Summary that synthesizes the divergent views, explicitly mentioning the dissent in {dissent_msg} if present.
-    3. If Security Override is active, explain specifically WHY the score was capped.
-    4. Provide specific Recommendations.
+    3. If 'Fact Supremacy' is applied, explain that AST/Structural evidence overrode subjective opinions.
+    4. If Security Override is active, explain specifically WHY the score was capped.
+    5. Provide specific Recommendations.
     5. For 'criterion_results', use the exact scores provided in 'Computed Criterion Scores', but generate the qualitative 'reasoning'.
-    
+    6. CRITICAL: In your 'summary', explicitly surface "Top Remaining Gaps" and "Primary Remediation Priorities" to help senior engineers quickly grasp the status.
+
     OUTPUT FORMAT (JSON):
-    {{
+    {
         "total_score": {final_score:.2f}, 
         "criterion_results": [
-            {{
+            {
                 "criterion": "Criterion Name",
                 "score": float, # MUST MATCH Computed Score
                 "reasoning": "Narrative explanation of the score and any conflict.",
                 "evidence_summary": "Key evidence."
-            }}
+            }
         ],
-        "summary": "Executive summary...",
+        "summary": "Executive summary including Top Remaining Gaps and Primary Remediation Priorities...",
         "recommendations": ["..."]
-    }}
+    }
     """
     
     messages = [
